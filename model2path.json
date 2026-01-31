@@ -1,0 +1,18 @@
+{
+    "llama-7b": "huggyllama/llama-7b",
+    "llama-13b": "huggyllama/llama-13b",
+    "llama-30b": "huggyllama/llama-30b",
+    "llama-65b": "huggyllama/llama-65b",
+    "llama-2-7b": "meta-llama/Llama-2-7b-hf",
+    "llama-2-13b": "meta-llama/Llama-2-13b-hf",
+    "llama-2-70b": "meta-llama/Llama-2-70b-hf",
+    "llama-3.1-8b": "meta-llama/Llama-3.1-8B",
+    "llama-3.1-8b-ins": "meta-llama/Llama-3.1-8B-Instruct",
+    "llama-3.2-3b": "meta-llama/Llama-3.2-3B",
+    "llama-3.2-3b-ins": "meta-llama/Llama-3.2-3B-Instruct",
+
+    "qwen3-4b": "Qwen/Qwen3-4B",
+    "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen3-14b": "Qwen/Qwen3-14B",
+    "qwen3-32b": "Qwen/Qwen3-32B"
+}
