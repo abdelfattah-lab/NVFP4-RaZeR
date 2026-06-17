@@ -115,7 +115,7 @@ class QuantQwen3Attention(nn.Module):
         #NOTE (Yuzong): activation quantization
         attn_output_quant = quant_act(attn_output, self.quant_config)
 
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output_quant)
         return attn_output, attn_weights
 
 
