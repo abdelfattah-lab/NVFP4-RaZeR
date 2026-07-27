@@ -6,7 +6,8 @@ It is split into three parts:
 
 - `kernel_extensions/`: CUDA/C++ extension sources used by the weight-only inference stack.
 - `gpt_fast_integration/`: a trimmed `gpt-fast` integration layer for quantization, loading, generation, and benchmarking.
-- `w4a4/`: the two-pass CUTLASS W4A4 benchmark code used for the current-hardware appendix experiments.
+- `w4a4/`: Blackwell W4A4 RaZeR emulation kernels, online activation
+  quantization, and native datatype baselines.
 
 The weight-only integration is organized around three kernel families:
 

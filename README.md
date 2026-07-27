@@ -64,7 +64,8 @@ The public inference-focused artifact lives in [`inference/`](inference/).
 That subtree contains:
 - the released weight-only kernel extensions in [`inference/kernel_extensions/`](inference/kernel_extensions/)
 - the trimmed `gpt-fast` integration in [`inference/gpt_fast_integration/`](inference/gpt_fast_integration/)
-- the W4A4 appendix implementations in [`inference/w4a4/`](inference/w4a4/)
+- the Blackwell W4A4 implementations in
+  [`inference/w4a4/`](inference/w4a4/)
 
 See [`inference/README.md`](inference/README.md) for the artifact layout and [`inference/gpt_fast_integration/README.md`](inference/gpt_fast_integration/README.md) for throughput-oriented quantization and generation instructions.
 
