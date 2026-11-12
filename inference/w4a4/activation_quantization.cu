@@ -1,7 +1,7 @@
 #include "activation_quantization.h"
 
 #include <cub/device/device_reduce.cuh>
-#include <cub/iterator/transform_input_iterator.cuh>
+#include <thrust/iterator/transform_iterator.h>
 
 #include <climits>
 #include <cmath>
@@ -56,18 +56,61 @@ __device__ __forceinline__ float decode_ue4m3(std::uint8_t raw) {
   return float(value);
 }
 
+// Byte offsets of one quantization block's outputs in the GEMM tile layout (razer_w4a4_kernels.cuh).
+// Row r, 16-wide block kb, half h (8 values): the 8 codes form one 32-bit word
+// of the mma.m16n8k64 A fragment of m-tile r / 16 and k-slice kb / 4.
+struct PackedOffsets {
+  std::size_t code_word;  // in 32-bit words
+  std::size_t scale_byte;
+};
+
+__device__ __forceinline__ PackedOffsets packed_offsets(
+    int row, int kb, int half, int k_slices, int tiles_per_group) {
+  int m_tile = row >> 4;
+  int group = m_tile / tiles_per_group;
+  int tile_in_group = m_tile - group * tiles_per_group;
+  int k_slice = kb >> 2;
+  int row_in_tile = row & 15;
+  int k_in_slice = (kb & 3) * 16 + half * 8;  // first k of the 8 values
+  std::size_t tile =
+      (std::size_t(group) * k_slices + k_slice) * tiles_per_group +
+      tile_in_group;
+  int lane = (row_in_tile & 7) * 4 + ((k_in_slice & 31) >> 3);
+  int reg = (row_in_tile >> 3) + 2 * (k_in_slice >> 5);
+  return {tile * 128 + lane * 4 + reg,
+          tile * 64 + row_in_tile * 4 + (kb & 3)};
+}
+
+// One thread pair per 16-value block of the padded m_padded x k matrix; each
+// thread quantizes 8 consecutive values.
 template <bool Razer>
 __global__ void quantize_fp32_blocks(
     float const* input,
     float const* tensor_absmax,
     std::uint8_t* packed_fp4,
     std::uint8_t* block_scales,
-    int num_blocks) {
+    int m,
+    int k,
+    int m_padded,
+    int tiles_per_group) {
   int global_thread =
       int(blockIdx.x) * int(blockDim.x) + int(threadIdx.x);
+  int k_blocks = k / kBlockSize;
   int block_index = global_thread >> 1;
   int pair_lane = global_thread & 1;
-  if (block_index >= num_blocks) return;
+  if (block_index >= m_padded * k_blocks) return;
+  int row = block_index / k_blocks;
+  int kb = block_index - row * k_blocks;
+  PackedOffsets offsets =
+      packed_offsets(row, kb, pair_lane, k / 64, tiles_per_group);
+  std::uint32_t* code_word =
+      reinterpret_cast<std::uint32_t*>(packed_fp4) + offsets.code_word;
+
+  if (row >= m) {  // padding row; uniform across the thread pair
+    *code_word = 0x88888888u;
+    if (pair_lane == 0) block_scales[offsets.scale_byte] = 0x38u;
+    return;
+  }
 
   unsigned active_mask = __activemask();
   float values[8];
@@ -75,7 +118,8 @@ __global__ void quantize_fp32_blocks(
 #pragma unroll
   for (int element = 0; element < 8; ++element) {
     float value =
-        input[block_index * kBlockSize + pair_lane * 8 + element];
+        input[std::size_t(row) * k + kb * kBlockSize + pair_lane * 8 +
+              element];
     values[element] = value;
     local_absmax = fmaxf(local_absmax, fabsf(value));
   }
@@ -84,11 +128,9 @@ __global__ void quantize_fp32_blocks(
   float absolute_max = *tensor_absmax;
 
   if (absolute_max == 0.0f) {
-    *reinterpret_cast<std::uint32_t*>(
-        packed_fp4 + block_index * 8 + pair_lane * 4) =
-        0x88888888u;
+    *code_word = 0x88888888u;
     if (pair_lane == 0) {
-      block_scales[block_index] = quantize_ue4m3(ldexpf(1.0f, -9));
+      block_scales[offsets.scale_byte] = quantize_ue4m3(ldexpf(1.0f, -9));
     }
     return;
   }
@@ -136,48 +178,75 @@ __global__ void quantize_fp32_blocks(
     }
   }
 
-  *reinterpret_cast<std::uint32_t*>(
-      packed_fp4 + block_index * 8 + pair_lane * 4) = packed;
+  *code_word = packed;
   if (pair_lane == 0) {
     std::uint8_t metadata =
         Razer && !select_positive ? std::uint8_t(0x80u)
                                   : std::uint8_t(0x00u);
-    block_scales[block_index] = std::uint8_t(scale_raw | metadata);
+    block_scales[offsets.scale_byte] = std::uint8_t(scale_raw | metadata);
   }
 }
 
-cudaError_t validate_element_count(std::size_t element_count) {
-  if (element_count == 0 ||
-      element_count % std::size_t(kBlockSize) != 0 ||
-      element_count > std::size_t(INT_MAX)) {
+cudaError_t validate_shape(int m, int k) {
+  if (m <= 0 || k <= 0 || k % 64 != 0 ||
+      std::size_t(m) * std::size_t(k) > std::size_t(INT_MAX)) {
     return cudaErrorInvalidValue;
   }
   return cudaSuccess;
 }
 
+bool valid_block_m(int block_m) {
+  return block_m == 16 || block_m == 32 || block_m == 64 || block_m == 128;
+}
+
+int padded_rows(int m, int block_m) {
+  return (m + block_m - 1) / block_m * block_m;
+}
+
 }  // namespace
 
 cudaError_t activation_quantization_workspace_size(
-    std::size_t element_count,
+    int m,
+    int k,
     std::size_t* workspace_bytes) {
   if (workspace_bytes == nullptr) return cudaErrorInvalidValue;
-  cudaError_t status = validate_element_count(element_count);
+  cudaError_t status = validate_shape(m, k);
   if (status != cudaSuccess) return status;
 
   AbsFloat transform;
-  cub::TransformInputIterator<float, AbsFloat, float const*> iterator(
-      nullptr, transform);
+  thrust::transform_iterator<AbsFloat, float const*, float> iterator(
+      static_cast<float const*>(nullptr), transform);
   return cub::DeviceReduce::Max(
       nullptr,
       *workspace_bytes,
       iterator,
       static_cast<float*>(nullptr),
-      int(element_count));
+      m * k);
+}
+
+cudaError_t activation_quantization_output_size(
+    int m,
+    int k,
+    int block_m,
+    std::size_t* packed_fp4_bytes,
+    std::size_t* block_scale_bytes) {
+  if (packed_fp4_bytes == nullptr || block_scale_bytes == nullptr ||
+      !valid_block_m(block_m)) {
+    return cudaErrorInvalidValue;
+  }
+  cudaError_t status = validate_shape(m, k);
+  if (status != cudaSuccess) return status;
+  std::size_t rows = std::size_t(padded_rows(m, block_m));
+  *packed_fp4_bytes = rows * std::size_t(k) / 2;
+  *block_scale_bytes = rows * std::size_t(k) / std::size_t(kBlockSize);
+  return cudaSuccess;
 }
 
 cudaError_t quantize_activations(
     float const* input,
-    std::size_t element_count,
+    int m,
+    int k,
+    int block_m,
     ActivationQuantizationFormat format,
     std::uint8_t* packed_fp4,
     std::uint8_t* block_scales,
@@ -185,8 +254,9 @@ cudaError_t quantize_activations(
     void* workspace,
     std::size_t workspace_bytes,
     cudaStream_t stream) {
-  cudaError_t status = validate_element_count(element_count);
+  cudaError_t status = validate_shape(m, k);
   if (status != cudaSuccess) return status;
+  if (!valid_block_m(block_m)) return cudaErrorInvalidValue;
   if (input == nullptr || packed_fp4 == nullptr ||
       block_scales == nullptr || tensor_absmax == nullptr) {
     return cudaErrorInvalidValue;
@@ -198,34 +268,42 @@ cudaError_t quantize_activations(
 
   std::size_t required_workspace = 0;
   status = activation_quantization_workspace_size(
-      element_count, &required_workspace);
+      m, k, &required_workspace);
   if (status != cudaSuccess) return status;
   if (workspace == nullptr || workspace_bytes < required_workspace) {
     return cudaErrorInvalidValue;
   }
 
+  // The tensor maximum covers the m real rows only.
   AbsFloat transform;
-  cub::TransformInputIterator<float, AbsFloat, float const*> iterator(
+  thrust::transform_iterator<AbsFloat, float const*, float> iterator(
       input, transform);
   status = cub::DeviceReduce::Max(
       workspace,
       workspace_bytes,
       iterator,
       tensor_absmax,
-      int(element_count),
+      m * k,
       stream);
   if (status != cudaSuccess) return status;
 
-  int num_blocks = int(element_count / std::size_t(kBlockSize));
+  int m_padded = padded_rows(m, block_m);
+  if (std::size_t(m_padded) * std::size_t(k) > std::size_t(INT_MAX)) {
+    return cudaErrorInvalidValue;
+  }
+  int num_blocks = m_padded * (k / kBlockSize);
   int grid = (num_blocks * 2 + kThreads - 1) / kThreads;
+  int tiles_per_group = block_m / 16;
   switch (format) {
     case ActivationQuantizationFormat::kNvfp4:
       quantize_fp32_blocks<false><<<grid, kThreads, 0, stream>>>(
-          input, tensor_absmax, packed_fp4, block_scales, num_blocks);
+          input, tensor_absmax, packed_fp4, block_scales, m, k, m_padded,
+          tiles_per_group);
       break;
     case ActivationQuantizationFormat::kRazer:
       quantize_fp32_blocks<true><<<grid, kThreads, 0, stream>>>(
-          input, tensor_absmax, packed_fp4, block_scales, num_blocks);
+          input, tensor_absmax, packed_fp4, block_scales, m, k, m_padded,
+          tiles_per_group);
       break;
   }
   return cudaPeekAtLastError();

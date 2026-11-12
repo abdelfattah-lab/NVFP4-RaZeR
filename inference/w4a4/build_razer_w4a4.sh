@@ -64,40 +64,14 @@ common=(
 
 build() {
   local output_name="$1"
-  local source="$2"
-  shift 2
-  "$nvcc_path" "${common[@]}" "$@" "$source" \
-    -o "$output_dir/$output_name"
+  shift
+  "$nvcc_path" "${common[@]}" "$@" -o "$output_dir/$output_name"
 }
 
-build weight_k128_pingpong "$script_dir/razer_weight_w4a4.cu"
-build weight_k128_cooperative "$script_dir/razer_weight_w4a4.cu" \
-  -DRAZER_COOPERATIVE
-build weight_k256_cooperative "$script_dir/razer_weight_w4a4.cu" \
-  -DRAZER_TILE_K=256 -DRAZER_COOPERATIVE
-build weight_split2_k128_cooperative "$script_dir/razer_weight_w4a4.cu" \
-  -DRAZER_STREAM_K -DRAZER_SPLIT_K=2 -DRAZER_COOPERATIVE
-build weight_split2_k256_cooperative "$script_dir/razer_weight_w4a4.cu" \
-  -DRAZER_STREAM_K -DRAZER_SPLIT_K=2 -DRAZER_TILE_K=256 \
-  -DRAZER_COOPERATIVE
-
-build full_k128_pingpong "$script_dir/razer_full_w4a4.cu" \
-  -DRAZER_FULL_OVERLAP_GRAPH
-build full_k128_cooperative "$script_dir/razer_full_w4a4.cu" \
-  -DRAZER_FULL_OVERLAP_GRAPH -DRAZER_COOPERATIVE
-build full_k256_cooperative "$script_dir/razer_full_w4a4.cu" \
-  -DRAZER_FULL_OVERLAP_GRAPH -DRAZER_TILE_K=256 -DRAZER_COOPERATIVE
-build full_split2_k128_cooperative "$script_dir/razer_full_w4a4.cu" \
-  -DRAZER_STREAM_K -DRAZER_FULL_SPLIT_K -DRAZER_SPLIT_K=2 \
-  -DRAZER_FULL_SPLIT_K_GRAPH -DRAZER_COOPERATIVE
-build full_split2_k256_cooperative "$script_dir/razer_full_w4a4.cu" \
-  -DRAZER_STREAM_K -DRAZER_FULL_SPLIT_K -DRAZER_SPLIT_K=2 \
-  -DRAZER_FULL_SPLIT_K_GRAPH -DRAZER_TILE_K=256 -DRAZER_COOPERATIVE
-build full_split4_k128_cooperative "$script_dir/razer_full_w4a4.cu" \
-  -DRAZER_STREAM_K -DRAZER_FULL_SPLIT_K -DRAZER_SPLIT_K=4 \
-  -DRAZER_FULL_SPLIT_K_GRAPH -DRAZER_COOPERATIVE
-
-"$nvcc_path" "${common[@]}" \
+# Each GEMM program compiles in all of its CTA configurations (listed by
+# --list-configs); each run selects one with --config.
+build razer_weight_w4a4 "$script_dir/razer_weight_w4a4.cu"
+build razer_full_w4a4 "$script_dir/razer_full_w4a4.cu"
+build activation_quantization_test \
   "$script_dir/activation_quantization.cu" \
-  "$script_dir/activation_quantization_test.cu" \
-  -o "$output_dir/activation_quantization_test"
+  "$script_dir/activation_quantization_test.cu"
